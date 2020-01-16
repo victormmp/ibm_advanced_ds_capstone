@@ -9,6 +9,11 @@ import warnings
 import json
 from sklearn.metrics import mean_squared_error
 import pprint as pp
+import matplotlib.pyplot as plt
+
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.optimizers import Adam
 
 from sklearn.model_selection import cross_val_score, train_test_split
 
@@ -180,38 +185,161 @@ class Regressor:
 
         self._objective = objective
 
+    def keras(self):
+        print('Using Keras as backend')
+
+        input_shape = self._parameters.get('input_shape', (32,))
+        layers = self._parameters.get('layers', [32, 1])
+        layers_activation = self._parameters.get('layers_activation', 'relu')
+        output_activation = self._parameters.get('output_activation', 'linear')
+        loss = self._parameters.get('loss', 'mean_squared_error')
+
+        adam_parameters = {
+            'learning_rate': 0.001,
+            'beta_1': 0.9,
+            'beta_2': 0.999,
+            'amsgrad': False
+        }
+        optimizer = self._parameters.get('optimizer', Adam)
+        optimizer_parameters = self._parameters.get('optimizer_parameters', adam_parameters)
+
+        opt = optimizer(**optimizer_parameters)
+
+        metrics = self._parameters.get('metrics', ['mean_squared_error'])
+
+        self._model = Sequential()
+
+        if len(layers) == 1:
+            self._model.add(Dense(layers[0], input_shape=input_shape, activation=output_activation))
+        elif len(layers) == 2:
+            self._model.add(Dense(layers[0], input_shape=input_shape, activation=layers_activation))
+            self._model.add(Dense(layers[1], activation=output_activation))
+        elif len(layers) > 2:
+            self._model.add(Dense(layers[0], input_shape=input_shape, activation=output_activation))
+            for layer in layers[1:-1]:
+                self._model.add(Dense(layer, activation=layers_activation))
+            self._model.add(Dense(layers[-1], activation=output_activation))
+
+        self._model.compile(loss=loss,
+                            optimizer=opt,
+                            metrics=metrics)
+
+        # Clear state parameters
+        self.x = None
+        self.y = None
+
+        # Define Keras train method
+        def model_train(x, y, **params):
+            self._model.fit(x, y, **params)
+
+        self._model_train = model_train
+
+        # Define Keras get parameter method
+        self._get_params = self._model.summary
+
+        def set_params(*args, **kwargs):
+            raise NotImplementedError('This option is not available when using Keras as backend model.')
+
+        self._set_params = set_params
+
+        # Define XGBoost predict method
+        def predict(x, **parameters):
+            return self._model.predict(x)
+
+        self._model_predict = predict
+
+        # Define model hyperparameter space for tuning
+        self._space = {
+            'objective': Adam,
+            'layers': hp.quniform('layers', 1, 100, 1),
+            'layers_activation': hp.choice('layers_activation', ['relu', 'linear']),
+            'learning_rate': hp.uniform('learning_rate', 0.0001, 0.1),
+            'beta_1': hp.uniform('beta_1', 0.001, 1),
+            'beta_2': hp.uniform('beta_2', 0.001, 1),
+            'amsgrad': hp.choice('amsgrad', [True, False]),
+            'epochs': hp.quniform('epochs', 1, 100, 1),
+            'batch_size': hp.quniform('batch_size', 1, 500, 10)
+        }
+
+        # Define objective function for hyperparameter tuning
+        def objective(params):
+
+            input_shape = self._parameters.get('input_shape', (32,))
+            layers = [params['layers'], 1]
+            layers_activation = params['layers_activation']
+            output_activation = self._parameters.get('output_activation', 'linear')
+            loss = self._parameters.get('loss', 'mean_squared_error')
+
+            optimizer = params['optimizer']
+            optimizer_parameters = {
+                'learning_rate': params['learning_rate'],
+                'beta_1': params['beta_1'],
+                'beta_2': params['beta_2'],
+                'amsgrad': params['amsgrad']
+            }
+
+            opt = optimizer(**optimizer_parameters)
+            metrics = self._parameters.get('metrics', ['mean_squared_error'])
+
+            model = Sequential()
+
+            if len(layers) == 1:
+                model.add(Dense(layers[0], input_shape=input_shape, activation=output_activation))
+            elif len(layers) == 2:
+                model.add(Dense(layers[0], input_shape=input_shape, activation=layers_activation))
+                model.add(Dense(layers[1], activation=output_activation))
+            elif len(layers) > 2:
+                model.add(Dense(layers[0], input_shape=input_shape, activation=output_activation))
+                for layer in layers[1:-1]:
+                    model.add(Dense(layer, activation=layers_activation))
+                model.add(Dense(layers[-1], activation=output_activation))
+
+            model.compile(loss=loss,
+                                optimizer=opt,
+                                metrics=metrics)
+
+            model.fit(self.x, self.y, epochs=params['epochs'])
+
+            #TODO: Implement score metric for Keras
+            return {'loss': -score, 'status': STATUS_OK}
+
+        self._objective = objective
+        
 
 if __name__ == '__main__':
     warnings.filterwarnings('ignore')
-
-    params = None
-    with open('best_params_xgboost.json') as fp:
-        params = json.load(fp)
-        pp.pprint(params)
-
-    clf = Regressor(**params)
-
-    root_dir = os.path.dirname(__file__)
-    sys.path.insert(0, root_dir + '/../../')
 
     file_path = './data/processed/1_1_processed_ordinal_encoding.csv'
     print(f'Loading file from {file_path}')
 
     df = pd.read_csv(file_path)
-    x = df.drop(['Wage'], axis=1)
-    y = df['Wage']
+    x = df.drop(['Value', 'Wage'], axis=1)
+    y = df['Value']
 
     x_train, x_test, y_train, y_test = train_test_split(x, y)
 
+    params = None
+    try:
+        with open('best_params_xgbost.json') as fp:
+            params = json.load(fp)
+            pp.pprint(params)
+    except:
+        params = {}
+
+    model = Regressor(**params)
+
     print('Tuning HyperParameters')
-    clf.tune_hyper_parameters(x_train, y_train)
+    model.tune_hyper_parameters(x_train, y_train)   
 
     print(f'Training model')
-    clf.train(x_train, y_train)
+    model.train(x_train, y_train)    
 
     print('Predicting test samples')
-    predictions: pd.DataFrame = clf.predict(x_test)
+    predictions: pd.DataFrame = model.predict(x_test)
 
-    print('Prediction Finished. F1 score:')
+    print('Prediction Finished. RMSE:')
     print(mean_squared_error(y_test, predictions, squared=False))
 
+    fig, ax = plt.subplots(figsize=(12,18))
+    xgb.plot_importance(model._model, max_num_features=50, height=0.8, ax=ax)
+    plt.show()
