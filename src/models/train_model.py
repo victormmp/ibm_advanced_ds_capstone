@@ -15,7 +15,7 @@ from keras.models import Sequential
 from keras.layers import Dense
 from keras.optimizers import Adam
 
-from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.model_selection import cross_val_score, train_test_split, KFold
 
 
 class Regressor:
@@ -29,7 +29,8 @@ class Regressor:
         self.trials = None
 
         self._model_init = {
-            'xgboost': self._xgboost
+            'xgboost': self._xgboost,
+            'keras': self._keras
         }.get(model, None)
 
         self._model_init()
@@ -87,14 +88,17 @@ class Regressor:
             space=self._space,
             algo=tpe.suggest,
             trials=self.trials,
+            return_argmin=False,
             max_evals=100)
 
-        self._parameters = best
+        print('Best: {}'.format(best))
+
+        self._parameters.update(best)
         
         self._model_init()
 
-        with open(f'best_params_{self.backend}.json', 'w') as fp:
-            json.dump(best, fp)
+        # with open(f'best_params_{self.backend}.json', 'w') as fp:
+        #     json.dump(best, fp)
 
         return self
 
@@ -185,14 +189,21 @@ class Regressor:
 
         self._objective = objective
 
-    def keras(self):
+    def _keras(self):
         print('Using Keras as backend')
 
         input_shape = self._parameters.get('input_shape', (32,))
-        layers = self._parameters.get('layers', [32, 1])
+        layers = self._parameters.get('layers', [32])
         layers_activation = self._parameters.get('layers_activation', 'relu')
         output_activation = self._parameters.get('output_activation', 'linear')
         loss = self._parameters.get('loss', 'mean_squared_error')
+
+        if not isinstance(layers, list):
+            layers = [layers]
+
+        layers = [int(l) for l in layers]
+
+        layers.append(1)
 
         adam_parameters = {
             'learning_rate': 0.001,
@@ -230,53 +241,67 @@ class Regressor:
 
         # Define Keras train method
         def model_train(x, y, **params):
+            try:
+                params['epochs'] = int(params['epochs'])
+            except:
+                params['epochs'] = int(self._parameters.get('epochs', 10))
+
+            try:
+                params['batch_size'] = int(params['batch_size'])
+            except:
+                params['batch_size'] = int(self._parameters.get('batch_size', 36))
+
             self._model.fit(x, y, **params)
 
         self._model_train = model_train
 
-        # Define Keras get parameter method
-        self._get_params = self._model.summary
+        def get_params():
+            return self._parameters
+
+        self._get_params = get_params
 
         def set_params(*args, **kwargs):
-            raise NotImplementedError('This option is not available when using Keras as backend model.')
+            self._keras()
 
         self._set_params = set_params
 
         # Define XGBoost predict method
-        def predict(x, **parameters):
-            return self._model.predict(x)
+        def predict(x, **params):
+            try:
+                params['batch_size'] = int(params['batch_size'])
+            except:
+                params['batch_size'] = int(self._parameters.get('batch_size', 36))
+
+            return self._model.predict(x, **params)
 
         self._model_predict = predict
 
         # Define model hyperparameter space for tuning
         self._space = {
-            'objective': Adam,
+            'optimizer': Adam,
             'layers': hp.quniform('layers', 1, 100, 1),
-            'layers_activation': hp.choice('layers_activation', ['relu', 'linear']),
-            'learning_rate': hp.uniform('learning_rate', 0.0001, 0.1),
-            'beta_1': hp.uniform('beta_1', 0.001, 1),
-            'beta_2': hp.uniform('beta_2', 0.001, 1),
-            'amsgrad': hp.choice('amsgrad', [True, False]),
+            'layers_activation': hp.choice('layers_activation', ['tanh', 'relu', 'linear']),
+            'optimizer_parameters': {
+                'learning_rate': hp.uniform('learning_rate', 0.0001, 0.1),
+                'beta_1': hp.uniform('beta_1', 0.001, 1),
+                'beta_2': hp.uniform('beta_2', 0.001, 1),
+                'amsgrad': hp.choice('amsgrad', (True, False)),
+            },
             'epochs': hp.quniform('epochs', 1, 100, 1),
-            'batch_size': hp.quniform('batch_size', 1, 500, 10)
+            'batch_size': hp.quniform('batch_size', 10, 500, 10)
         }
 
         # Define objective function for hyperparameter tuning
         def objective(params):
 
             input_shape = self._parameters.get('input_shape', (32,))
-            layers = [params['layers'], 1]
+            layers = [int(params['layers']), 1]
             layers_activation = params['layers_activation']
             output_activation = self._parameters.get('output_activation', 'linear')
             loss = self._parameters.get('loss', 'mean_squared_error')
 
             optimizer = params['optimizer']
-            optimizer_parameters = {
-                'learning_rate': params['learning_rate'],
-                'beta_1': params['beta_1'],
-                'beta_2': params['beta_2'],
-                'amsgrad': params['amsgrad']
-            }
+            optimizer_parameters = params['optimizer_parameters']
 
             opt = optimizer(**optimizer_parameters)
             metrics = self._parameters.get('metrics', ['mean_squared_error'])
@@ -295,16 +320,22 @@ class Regressor:
                 model.add(Dense(layers[-1], activation=output_activation))
 
             model.compile(loss=loss,
-                                optimizer=opt,
-                                metrics=metrics)
+                          optimizer=opt,
+                          metrics=metrics)
 
-            model.fit(self.x, self.y, epochs=params['epochs'])
+            losses = []
+            k_fold = KFold(n_splits=5, shuffle=True)
+            for train, test in k_fold.split(self.x, self.y):
+                model.fit(self.x.iloc[train, :], self.y.iloc[train, :], epochs=int(params['epochs']), batch_size=int(params['batch_size']), verbose=0)
+                loss = model.evaluate(self.x.iloc[test, :], self.y.iloc[test, :], batch_size=int(params['batch_size']), verbose=0)
+                losses.append(loss[1])
 
-            #TODO: Implement score metric for Keras
-            return {'loss': -score, 'status': STATUS_OK}
+            # loss contains loss and mse
+
+            return {'loss': np.mean(losses), 'status': STATUS_OK}
 
         self._objective = objective
-        
+
 
 if __name__ == '__main__':
     warnings.filterwarnings('ignore')
@@ -314,32 +345,28 @@ if __name__ == '__main__':
 
     df = pd.read_csv(file_path)
     x = df.drop(['Value', 'Wage'], axis=1)
-    y = df['Value']
+    y = df[['Value']]
 
     x_train, x_test, y_train, y_test = train_test_split(x, y)
 
-    params = None
-    try:
-        with open('best_params_xgbost.json') as fp:
-            params = json.load(fp)
-            pp.pprint(params)
-    except:
-        params = {}
+    params = {}
 
-    model = Regressor(**params)
+    model = Regressor(model='keras', input_shape=(x_train.shape[1],),  **params)
 
     print('Tuning HyperParameters')
-    model.tune_hyper_parameters(x_train, y_train)   
+    model.tune_hyper_parameters(x_train, y_train)
 
-    print(f'Training model')
-    model.train(x_train, y_train)    
+    print(model._parameters)
 
-    print('Predicting test samples')
-    predictions: pd.DataFrame = model.predict(x_test)
-
-    print('Prediction Finished. RMSE:')
-    print(mean_squared_error(y_test, predictions, squared=False))
-
-    fig, ax = plt.subplots(figsize=(12,18))
-    xgb.plot_importance(model._model, max_num_features=50, height=0.8, ax=ax)
-    plt.show()
+    # print(f'Training model')
+    # model.train(x_train, y_train)
+    #
+    # print('Predicting test samples')
+    # predictions: pd.DataFrame = model.predict(x_test)
+    #
+    # print('Prediction Finished. RMSE:')
+    # print(mean_squared_error(y_test, predictions, squared=False))
+    #
+    # fig, ax = plt.subplots(figsize=(12,18))
+    # xgb.plot_importance(model._model, max_num_features=50, height=0.8, ax=ax)
+    # plt.show()
