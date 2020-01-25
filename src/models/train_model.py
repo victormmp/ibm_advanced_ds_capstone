@@ -1,20 +1,12 @@
-import xgboost as xgb
-from typing import List, Dict
-from hyperopt import hp, STATUS_OK, fmin, tpe, Trials
+import warnings
+
 import numpy as np
 import pandas as pd
-import os
-import sys
-import warnings
-import json
-from sklearn.metrics import mean_squared_error
-import pprint as pp
-import matplotlib.pyplot as plt
-
-from keras.models import Sequential
+import xgboost as xgb
+from hyperopt import hp, STATUS_OK, fmin, tpe, Trials
 from keras.layers import Dense
+from keras.models import Sequential
 from keras.optimizers import Adam
-
 from sklearn.model_selection import cross_val_score, train_test_split, KFold
 
 

@@ -3,6 +3,19 @@ ibm
 
 Short Data Science project management repository.
 
+---
+
+**Author**: Victor Magalhães
+
+**Year**: 2020
+
+**Original dataset link**: https://www.kaggle.com/karangadiya/fifa19
+
+___
+
+Notebooks featuring ETL processing, feature engineering process and model training and performace can be found at 
+`notebooks` folder. Follow project organization below.
+
 Project Organization
 ------------
 
